@@ -1,0 +1,234 @@
+function cancellationError() {
+  const error = new Error("Resource request cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
+export class RuntimeResourceCoordinator {
+  constructor(controller, onDeadlock) {
+    this.controller = controller;
+    this.onDeadlock = onDeadlock;
+    this.waiters = new Map();
+    this.waitingByAgent = new Map();
+  }
+
+  syncQueue(resourceId) {
+    const queue = this.waiters.get(resourceId) ?? [];
+    this.controller.resourceWaiters.set(
+      resourceId,
+      queue.map(waiter => waiter.agentId)
+    );
+  }
+
+  removeWaiter(waiter) {
+    const queue = this.waiters.get(waiter.resourceId) ?? [];
+
+    this.waiters.set(
+      waiter.resourceId,
+      queue.filter(item => item !== waiter)
+    );
+
+    if (this.waitingByAgent.get(waiter.agentId) === waiter) {
+      this.waitingByAgent.delete(waiter.agentId);
+    }
+
+    this.controller.waitGraph.removeDependency(
+      waiter.agentId,
+      waiter.blockingAgent
+    );
+
+    waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    this.syncQueue(waiter.resourceId);
+  }
+
+  async request(agentId, resourceId, signal) {
+    if (signal?.aborted) throw cancellationError();
+
+    if (this.waitingByAgent.has(agentId)) {
+      throw new Error(`${agentId} already has a pending resource request`);
+    }
+
+    const existingOwner =
+      this.controller.resources.getLocks()[resourceId];
+
+    if (!existingOwner || existingOwner === agentId) {
+      const result = this.controller.resources.acquire(
+        resourceId,
+        agentId
+      );
+
+      if (result.acquired) {
+        return { ...result, status: "granted" };
+      }
+    }
+
+    const result = this.controller.resources.acquire(
+      resourceId,
+      agentId
+    );
+
+    if (result.acquired) {
+      return { ...result, status: "granted" };
+    }
+
+    const conflict = this.controller.conflicts.check(
+      resourceId,
+      agentId
+    );
+
+    this.controller.waitGraph.addDependency(
+      agentId,
+      result.owner
+    );
+
+    const registryAgent = this.controller.registry.get(agentId);
+
+    if (registryAgent) {
+      registryAgent.status = "waiting";
+      registryAgent.blockedBy = result.owner;
+    }
+
+    let resolvePromise;
+    let rejectPromise;
+
+    const promise = new Promise((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+
+    const waiter = {
+      agentId,
+      resourceId,
+      blockingAgent: result.owner,
+      signal,
+      resolve: resolvePromise,
+      reject: rejectPromise,
+      onAbort: null
+    };
+
+    waiter.onAbort = () => {
+      this.removeWaiter(waiter);
+
+      rejectPromise(cancellationError());
+    };
+
+    if (!this.waiters.has(resourceId)) {
+      this.waiters.set(resourceId, []);
+    }
+
+    this.waiters.get(resourceId).push(waiter);
+    this.waitingByAgent.set(agentId, waiter);
+
+    signal?.addEventListener("abort", waiter.onAbort, {
+      once: true
+    });
+
+    this.syncQueue(resourceId);
+
+    const deadlock = this.controller.deadlocks.detect();
+
+    if (deadlock.deadlocked) {
+      console.log("[Deadlock Detector] Runtime cycle detected:", deadlock.cycles);
+
+      // The latest requester is the victim in this MVP.
+      // Abort it; its execution cleanup will release its owned locks.
+      this.onDeadlock(agentId, deadlock);
+    }
+
+    return promise;
+  }
+
+  release(agentId, resourceId) {
+    const locks = this.controller.resources.getLocks();
+
+    if (locks[resourceId] !== agentId) {
+      return { released: false };
+    }
+
+    this.controller.resources.release(resourceId, agentId);
+
+    const queue = this.waiters.get(resourceId) ?? [];
+
+    while (queue.length > 0) {
+      const waiter = queue.shift();
+
+      if (waiter.signal?.aborted) {
+        this.removeWaiter(waiter);
+        continue;
+      }
+
+      const acquired = this.controller.resources.acquire(
+        resourceId,
+        waiter.agentId
+      );
+
+      if (!acquired.acquired) continue;
+
+      this.waitingByAgent.delete(waiter.agentId);
+
+      this.controller.waitGraph.removeDependency(
+        waiter.agentId,
+        agentId
+      );
+
+      const nextAgent = this.controller.registry.get(waiter.agentId);
+
+      if (nextAgent) {
+        nextAgent.status = "working";
+        nextAgent.blockedBy = null;
+      }
+
+      waiter.signal?.removeEventListener(
+        "abort",
+        waiter.onAbort
+      );
+
+      this.syncQueue(resourceId);
+
+      waiter.resolve({
+        acquired: true,
+        resourceId,
+        agentId: waiter.agentId,
+        status: "granted"
+      });
+
+      return {
+        released: true,
+        grantedTo: waiter.agentId
+      };
+    }
+
+    this.syncQueue(resourceId);
+
+    return { released: true, grantedTo: null };
+  }
+
+  releaseAll(agentId) {
+    const locks = this.controller.resources.getLocks();
+    const released = [];
+
+    for (const [resourceId, owner] of Object.entries(locks)) {
+      if (owner !== agentId) continue;
+
+      const result = this.release(agentId, resourceId);
+
+      if (result.released) {
+        released.push(resourceId);
+      }
+    }
+
+    return released;
+  }
+
+  getWaiting() {
+    return Object.fromEntries(
+      [...this.waiters.entries()].map(([resource, queue]) => [
+        resource,
+        queue.map(waiter => ({
+          agentId: waiter.agentId,
+          blockingAgent: waiter.blockingAgent
+        }))
+      ])
+    );
+  }
+}

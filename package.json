@@ -1,0 +1,18 @@
+{
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "sarvamai": "^1.1.17"
+  },
+  "name": "agent-traffic-controller",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module"
+}

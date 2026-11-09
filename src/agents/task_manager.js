@@ -1,0 +1,120 @@
+export class TaskManager {
+  constructor(registry) {
+    this.registry = registry;
+    this.tasks = new Map();
+  }
+
+  create(id, description, priority = 1, resources = []) {
+    if (this.tasks.has(id)) {
+      throw new Error(`Task ${id} already exists`);
+    }
+
+    const task = {
+      id,
+      description,
+      priority,
+      resources,
+      status: "pending",
+      assignedTo: null,
+      result: null,
+      error: null,
+      retryCount: 0,
+      createdAt: Date.now(),
+      completedAt: null
+    };
+
+    this.tasks.set(id, task);
+    return task;
+  }
+
+  assign(taskId, agentId) {
+    const task = this.tasks.get(taskId);
+    const agent = this.registry.get(agentId);
+
+    if (!task || !agent) {
+      throw new Error("Task or agent not found");
+    }
+
+    if (task.status !== "pending") {
+      throw new Error("Task is not pending");
+    }
+
+    if (agent.status !== "idle") {
+      throw new Error("Agent is not idle");
+    }
+
+    task.assignedTo = agentId;
+    task.status = "running";
+    agent.currentTask = taskId;
+    agent.status = "working";
+
+    return task;
+  }
+
+  complete(taskId, result) {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+
+    task.status = "completed";
+    task.result = result;
+    task.completedAt = Date.now();
+
+    const agent = this.registry.get(task.assignedTo);
+
+    if (agent) {
+      agent.currentTask = null;
+      agent.status = "idle";
+    }
+
+    return task;
+  }
+
+  fail(taskId, error) {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+
+    task.status = "failed";
+    task.error = String(error);
+    task.completedAt = Date.now();
+
+    const agent = this.registry.get(task.assignedTo);
+
+    if (agent) {
+      agent.currentTask = null;
+      agent.status = "idle";
+    }
+
+    return task;
+  }
+
+  retry(taskId, reason = "Task interrupted") {
+    const task = this.tasks.get(taskId);
+
+    if (!task) {
+      throw new Error(`Unknown task: ${taskId}`);
+    }
+
+    if (task.status !== "running") {
+      throw new Error("Only running tasks can be retried");
+    }
+
+    const agent = this.registry.get(task.assignedTo);
+
+    if (agent) {
+      agent.currentTask = null;
+      agent.status = "idle";
+    }
+
+    task.status = "pending";
+    task.assignedTo = null;
+    task.result = null;
+    task.error = reason;
+    task.retryCount++;
+
+    return task;
+  }
+
+  list() {
+    return [...this.tasks.values()];
+  }
+}

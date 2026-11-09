@@ -1,0 +1,76 @@
+import { askSarvam } from "../sarvam/client.js";
+
+export class AIAgent {
+  constructor(id, role) {
+    this.id = id;
+    this.role = role;
+    this.status = "idle";
+    this.lastResult = null;
+  }
+
+  async execute(task, context = "") {
+    if (this.status === "working") {
+      throw new Error(`${this.id} is already working`);
+    }
+
+    this.status = "working";
+
+    try {
+      console.log(`\n[${this.id}] Starting task: ${task}`);
+
+      const result = await askSarvam([
+        {
+          role: "system",
+          content: `
+You are ${this.id}, a specialist AI agent.
+
+Your role: ${this.role}.
+
+PROJECT CONTEXT:
+We are building an Agent Traffic Controller: a software system
+that coordinates multiple AI agents and prevents resource conflicts,
+circular waits, deadlocks, scheduling problems and execution failures.
+
+IMPORTANT:
+This is NOT a road traffic management system.
+Do not discuss roads, intersections, vehicles or traffic lights
+unless explicitly asked.
+
+Perform only your assigned role.
+Use the context from previous agents.
+Be technically precise.
+Clearly distinguish recommendations from implemented functionality.
+          `.trim()
+        },
+        {
+          role: "user",
+          content: `
+TASK:
+${task}
+
+PREVIOUS AGENT OUTPUT:
+${context || "No previous output."}
+
+Provide a structured technical response.
+          `.trim()
+        }
+      ]);
+
+      this.lastResult = result;
+
+      return {
+        agentId: this.id,
+        role: this.role,
+        status: "completed",
+        result
+      };
+    } catch (error) {
+      this.status = "failed";
+      throw error;
+    } finally {
+      if (this.status !== "failed") {
+        this.status = "idle";
+      }
+    }
+  }
+}

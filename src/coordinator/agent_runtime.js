@@ -1,0 +1,340 @@
+import { RuntimeResourceCoordinator } from "./runtime_resource_coordinator.js";
+
+export class AgentRuntime {
+  constructor(controller, workers) {
+    this.controller = controller;
+    this.workers = workers;
+    this.workerIndex = 0;
+    this.executionHistory = [];
+    this.waitingTasks = [];
+
+    this.activeExecutions = new Map();
+    this.maxRetries = 2;
+
+    // One resource coordinator owns all runtime resource requests.
+    this.resourceCoordinator = new RuntimeResourceCoordinator(
+      controller,
+      (victim, deadlock) => {
+        console.log(`[Recovery] Deadlock victim selected: ${victim}`);
+        this.controller.emitEvent?.("deadlock.victim_selected", {
+          agentId: victim, cycles: deadlock.cycles
+        });
+
+        // Abort the victim; executePrepared handles retry and cleanup.
+        void this.cancelAgent(victim, "Runtime deadlock recovery");
+      }
+    );
+  }
+
+  findAvailableWorker() {
+    for (let i = 0; i < this.workers.length; i++) {
+      const index = (this.workerIndex + i) % this.workers.length;
+      const worker = this.workers[index];
+      const agent = this.controller.registry.get(worker.id);
+
+      if (agent && agent.status === "idle") {
+        return { worker, index };
+      }
+    }
+
+    return null;
+  }
+
+  getActiveExecutions() {
+    return [...this.activeExecutions.values()].map(execution => ({
+      agentId: execution.agentId,
+      taskId: execution.taskId,
+      startedAt: execution.startedAt,
+      cancellationRequested: execution.cancellationRequested
+    }));
+  }
+
+  async cancelAgent(agentId, reason = "Deadlock recovery") {
+    const execution = this.activeExecutions.get(agentId);
+
+    if (!execution) {
+      return {
+        cancelled: false,
+        reason: "No active execution found"
+      };
+    }
+
+    if (execution.cancellationRequested) {
+      return {
+        cancelled: true,
+        alreadyRequested: true,
+        taskId: execution.taskId
+      };
+    }
+
+    execution.cancellationRequested = true;
+    execution.cancellationReason = reason;
+    this.controller.emitEvent?.("agent.cancellation_requested", {
+      agentId, taskId: execution.taskId, reason
+    });
+
+    console.log(`[Recovery] Cancelling ${agentId}: ${reason}`);
+
+    execution.abortController.abort();
+
+    await execution.promise;
+
+    return {
+      cancelled: true,
+      taskId: execution.taskId,
+      agentId
+    };
+  }
+
+  async executePrepared(task, worker, resources) {
+    const startedAt = Date.now();
+    const abortController = new AbortController();
+    const acquiredResources = new Set();
+
+    const execution = {
+      agentId: worker.id,
+      taskId: task.id,
+      startedAt,
+      abortController,
+      cancellationRequested: false,
+      cancellationReason: null,
+      promise: null
+    };
+
+    this.activeExecutions.set(worker.id, execution);
+    this.controller.emitEvent?.("task.execution_started", {
+      taskId: task.id, agentId: worker.id
+    });
+
+    // This callback is available to local worker tools and orchestrators.
+    const requestResource = async resourceId => {
+      return this.resourceCoordinator.request(
+        worker.id,
+        resourceId,
+        abortController.signal
+      );
+    };
+
+    const releaseResource = async resourceId => {
+      return this.resourceCoordinator.release(
+        worker.id,
+        resourceId
+      );
+    };
+
+    const getResourceStatus = () => ({
+      locks: { ...this.controller.resources.getLocks() },
+      waiting: this.resourceCoordinator.getWaiting()
+    });
+
+    console.log(`\n[${worker.id}] Executing ${task.id}`);
+
+    execution.promise = (async () => {
+      try {
+        // Acquire declared task resources through the same coordinator.
+        for (const resourceId of resources) {
+          await requestResource(resourceId);
+          console.log(`[Lock Manager] Acquired: ${resourceId}`);
+        }
+
+        const result = await worker.execute(
+          task.description,
+          "",
+          {
+            signal: abortController.signal,
+            requestResource,
+            releaseResource,
+            getResourceStatus
+          }
+        );
+
+        if (execution.cancellationRequested) {
+          const error = new Error("Agent execution cancelled");
+          error.name = "AbortError";
+          throw error;
+        }
+
+        this.controller.tasks.complete(task.id, result);
+        this.controller.emitEvent?.("task.completed", {
+          taskId: task.id, agentId: worker.id
+        });
+
+        const record = {
+          taskId: task.id,
+          agentId: worker.id,
+          status: "completed",
+          durationMs: Date.now() - startedAt
+        };
+
+        this.executionHistory.push(record);
+        return record;
+
+      } catch (error) {
+        const cancelled =
+          execution.cancellationRequested ||
+          error.name === "AbortError";
+
+        if (cancelled) {
+          const record = {
+            taskId: task.id,
+            agentId: worker.id,
+            status: "cancelled",
+            reason: execution.cancellationReason || error.message
+          };
+
+          this.executionHistory.push(record);
+
+                    this.controller.emitEvent?.("agent.cancelled", {
+            agentId: worker.id, taskId: task.id, reason: record.reason
+          });
+          const taskRecord = this.controller.tasks.list()
+            .find(item => item.id === task.id);
+
+          if (taskRecord && taskRecord.retryCount < this.maxRetries) {
+            const retriedTask = this.controller.tasks.retry(
+              task.id,
+              record.reason
+            );
+
+            this.controller.scheduler.enqueue(retriedTask);
+            this.controller.emitEvent?.("task.requeued", {
+              taskId: task.id, agentId: worker.id,
+              retryCount: retriedTask.retryCount
+            });
+            record.requeued = true;
+            record.retryCount = retriedTask.retryCount;
+
+            console.log(
+              `[Scheduler] Requeued ${task.id} (attempt ${retriedTask.retryCount})`
+            );
+
+          } else if (taskRecord) {
+            this.controller.tasks.fail(
+              task.id,
+              "Maximum retry attempts reached"
+            );
+
+            record.requeued = false;
+            record.reason = "Maximum retry attempts reached";
+          }
+
+          return record;
+        }
+
+        this.controller.tasks.fail(task.id, error.message);
+        this.controller.emitEvent?.("task.failed", {
+          taskId: task.id, agentId: worker.id, error: error.message
+        });
+
+        const record = {
+          taskId: task.id,
+          agentId: worker.id,
+          status: "failed",
+          error: error.message
+        };
+
+        this.executionHistory.push(record);
+        return record;
+
+      } finally {
+        this.activeExecutions.delete(worker.id);
+
+        // Release every lock acquired through this runtime coordinator.
+        const released = this.resourceCoordinator.releaseAll(worker.id);
+
+        for (const resourceId of released) {
+          console.log(
+            `[Lock Manager] Released: ${resourceId} by ${worker.id}`
+          );
+        }
+      }
+    })();
+
+    return execution.promise;
+  }
+
+  async runAll() {
+    const results = [];
+
+    while (this.controller.scheduler.list().length > 0) {
+      const queueSize = this.controller.scheduler.list().length;
+      const batch = [];
+      const deferred = [];
+      const reservedWorkers = new Set();
+
+      for (let i = 0; i < queueSize; i++) {
+        const task = this.controller.scheduler.next();
+        const selection = this.findAvailableWorker();
+
+        if (!selection) {
+          deferred.push(task);
+          continue;
+        }
+
+        const { worker, index } = selection;
+
+        if (reservedWorkers.has(worker.id)) {
+          deferred.push(task);
+          continue;
+        }
+
+        reservedWorkers.add(worker.id);
+
+        try {
+          this.controller.tasks.assign(task.id, worker.id);
+          this.controller.emitEvent?.("task.assigned", {
+            taskId: task.id, agentId: worker.id
+          });
+          this.workerIndex = (index + 1) % this.workers.length;
+
+          batch.push({
+            task,
+            worker,
+            resources: [...new Set(task.resources ?? [])].sort()
+          });
+
+        } catch (error) {
+          deferred.push(task);
+        }
+      }
+
+      for (const task of deferred) {
+        this.controller.scheduler.enqueue(task);
+      }
+
+      if (batch.length === 0) {
+        this.waitingTasks = deferred.map(task => task.id);
+
+        return {
+          results,
+          status: "blocked",
+          waitingTasks: this.waitingTasks
+        };
+      }
+
+      console.log(
+        `\n[Scheduler] Dispatching ${batch.length} tasks concurrently.`
+      );
+
+      const completed = await Promise.all(
+        batch.map(({ task, worker, resources }) =>
+          this.executePrepared(task, worker, resources)
+        )
+      );
+
+      results.push(...completed);
+    }
+
+    this.waitingTasks = [];
+
+    return {
+      results,
+      status: "completed",
+      waitingTasks: []
+    };
+  }
+
+  getHistory() {
+    return [...this.executionHistory];
+  }
+}

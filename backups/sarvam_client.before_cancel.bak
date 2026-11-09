@@ -1,0 +1,64 @@
+import "dotenv/config";
+
+const API_URL = "https://api.sarvam.ai/v2/chat/completions";
+
+export async function askSarvam(messages) {
+  const apiKey = process.env.SARVAM_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("SARVAM_API_KEY missing from .env");
+  }
+
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 120000);
+
+  try {
+    console.log("[Sarvam] Sending API request...");
+
+    const response = await fetch(API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-subscription-key": apiKey
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: "glm5.3",
+        messages,
+        reasoning_effort: "low",
+        max_tokens: 1200
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        `Sarvam API ${response.status}: ${JSON.stringify(data)}`
+      );
+    }
+
+    const result = data.choices?.[0]?.message?.content;
+
+    if (!result) {
+      throw new Error("Empty response from Sarvam");
+    }
+
+    console.log("[Sarvam] Response received.");
+
+    return result;
+
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Sarvam request timed out after 120 seconds");
+    }
+
+    throw error;
+
+  } finally {
+    clearTimeout(timeout);
+  }
+}

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0b0e0d">
+  <title>ATC / CONTROL — Agent Operations</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">A<span>/</span>T</div>
+        <div>
+          <div class="brand-name">ATC <span>/ CONTROL</span></div>
+          <div class="brand-sub">AGENT TRAFFIC CONTROL</div>
+        </div>
+      </div>
+
+      <div class="side-label">OPERATIONS</div>
+      <a class="nav-item active" href="#overview"><span>▦</span> Command overview <small>01</small></a>
+      <a class="nav-item" href="#topology"><span>⌘</span> Dependency map <small>02</small></a>
+      <a class="nav-item" href="#resources"><span>▤</span> Resource registry <small>03</small></a>
+      <a class="nav-item" href="#incidents"><span>◉</span> Incident recorder <small>04</small></a>
+
+      <div class="side-label side-gap">VALIDATION</div>
+      <a class="nav-item" href="#chaos"><span>⌁</span> Chaos laboratory <small>05</small></a>
+
+      <div class="sidebar-bottom">
+        <div class="system-box">
+          <div class="system-box-head"><span class="pulse-dot"></span> LOCAL ENGINE</div>
+          <div class="system-version">ATC CORE / NODE.JS</div>
+          <div class="system-state" id="engine-state">INITIALIZING</div>
+        </div>
+        <div class="sidebar-foot">BUILD 0.1.0 <span>·</span> LOCAL INSTANCE</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumb">SYSTEMS <span>/</span> OPERATIONS <span>/</span> <b>COMMAND</b></div>
+        <div class="top-actions">
+          <div class="live-indicator"><i></i> LIVE TELEMETRY</div>
+          <div class="clock" id="clock">--:--:--</div>
+        </div>
+      </header>
+
+      <section id="overview" class="page-head">
+        <div>
+          <div class="eyebrow">DISTRIBUTED SYSTEMS / OBSERVABILITY</div>
+          <h1>Command <span>overview.</span></h1>
+          <p>Runtime coordination, resource contention and recovery intelligence.</p>
+        </div>
+        <div class="system-status">
+          <span class="status-square" id="health-square"></span>
+          <div><small>ENGINE STATUS</small><strong id="health-label">STANDBY</strong></div>
+        </div>
+      </section>
+
+      <section class="metric-grid">
+        <article class="metric-card">
+          <div class="metric-top"><span>REGISTERED AGENTS</span><span class="metric-icon">⌘</span></div>
+          <div class="metric-value" id="metric-agents">00</div>
+          <div class="metric-foot"><span class="green-text" id="metric-agents-active">0 active</span><span>WORKER REGISTRY</span></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span>TASK EXECUTIONS</span><span class="metric-icon">↗</span></div>
+          <div class="metric-value" id="metric-tasks">00</div>
+          <div class="metric-foot"><span id="metric-task-detail">0 completed</span><span>EXECUTION LEDGER</span></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span>HELD RESOURCES</span><span class="metric-icon">▤</span></div>
+          <div class="metric-value" id="metric-locks">00</div>
+          <div class="metric-foot"><span id="metric-lock-detail">No active locks</span><span>LOCK MANAGER</span></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span>DEADLOCK INCIDENTS</span><span class="metric-icon">⌁</span></div>
+          <div class="metric-value" id="metric-incidents">00</div>
+          <div class="metric-foot"><span id="metric-recovery" class="green-text">Recovery standing by</span><span>DETECTOR</span></div>
+        </article>
+      </section>
+
+      <section class="workspace-grid">
+        <article class="panel topology-panel" id="topology">
+          <div class="panel-heading">
+            <div><div class="eyebrow">01 / DEPENDENCY ANALYSIS</div><h2>Wait-for topology</h2></div>
+            <div class="panel-tools"><span class="tiny-live"></span><span id="graph-state">NO ACTIVE CYCLES</span></div>
+          </div>
+          <div class="graph-wrap">
+            <svg id="dependency-graph" viewBox="0 0 700 330" role="img" aria-label="Agent wait-for dependency graph">
+              <g class="graph-empty">
+                <circle cx="350" cy="145" r="42"></circle>
+                <text x="350" y="140" text-anchor="middle">NO EDGES</text>
+                <text x="350" y="160" text-anchor="middle" class="graph-empty-sub">AWAITING DEPENDENCIES</text>
+              </g>
+            </svg>
+            <div class="graph-legend">
+              <span><i class="legend-node"></i> Agent</span>
+              <span><i class="legend-edge"></i> Waiting dependency</span>
+              <span><i class="legend-cycle"></i> Deadlock cycle</span>
+            </div>
+          </div>
+          <div class="topology-foot"><span>DIRECTED WAIT-FOR GRAPH</span><span id="graph-nodes">0 NODES / 0 EDGES</span></div>
+        </article>
+
+        <article class="panel resource-panel" id="resources">
+          <div class="panel-heading">
+            <div><div class="eyebrow">02 / SHARED STATE</div><h2>Resource registry</h2></div>
+            <span class="tag">EXCLUSIVE LOCKS</span>
+          </div>
+          <div id="resource-list" class="resource-list">
+            <div class="empty-state">No resource activity recorded.</div>
+          </div>
+          <div class="resource-foot">
+            <span>LOCK OWNERSHIP</span>
+            <span id="queue-total">0 WAITING</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel agents-panel">
+        <div class="panel-heading">
+          <div><div class="eyebrow">03 / WORKER REGISTRY</div><h2>Agent field</h2></div>
+          <span class="tag" id="agent-count-tag">0 REGISTERED</span>
+        </div>
+        <div id="agent-list" class="agent-grid">
+          <div class="empty-state">No agents registered. Launch a scenario in the Chaos Laboratory.</div>
+        </div>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel events-panel" id="incidents">
+          <div class="panel-heading">
+            <div><div class="eyebrow">04 / EVENT JOURNAL</div><h2>Incident recorder</h2></div>
+            <button class="text-button" id="clear-view">CLEAR VIEW ↗</button>
+          </div>
+          <div class="event-columns"><span>EVENT</span><span>SUBJECT</span><span>TIME</span></div>
+          <div id="event-list" class="event-list">
+            <div class="empty-state">Waiting for runtime events...</div>
+          </div>
+          <div class="event-foot"><span>SERVER EVENT BUS</span><span id="event-count">0 EVENTS</span></div>
+        </article>
+
+        <article class="panel chaos-panel" id="chaos">
+          <div class="panel-heading">
+            <div><div class="eyebrow">05 / VALIDATION ENVIRONMENT</div><h2>Chaos laboratory</h2></div>
+            <span class="tag tag-amber">CONTROLLED INJECTION</span>
+          </div>
+          <p class="chaos-description">Launch a deterministic resource-contention scenario against the live coordination runtime.</p>
+          <div class="scenario-label">CONCURRENT WORKERS</div>
+          <div class="worker-select" id="worker-select">
+            <button data-count="3" class="selected">03</button>
+            <button data-count="5">05</button>
+            <button data-count="10">10</button>
+            <button data-count="20">20</button>
+          </div>
+          <div class="scenario-meta">
+            <div><span>SHARED RESOURCES</span><b>DATABASE / CACHE</b></div>
+            <div><span>INJECTION TYPE</span><b>CIRCULAR WAIT</b></div>
+            <div><span>RECOVERY POLICY</span><b>VICTIM ABORT + RETRY</b></div>
+          </div>
+          <button id="run-chaos" class="run-button"><span>▶</span> EXECUTE STRESS TEST <i>↗</i></button>
+          <div id="chaos-status" class="chaos-status">ENGINE STANDING BY / NO TEST ACTIVE</div>
+          <div id="test-results" class="test-results">
+            <div class="empty-state">Run a test to generate verifiable assertions.</div>
+          </div>
+          <button id="replay-button" class="replay-button" disabled>↻ REPLAY LAST INCIDENT</button>
+        </article>
+      </section>
+
+      <footer class="footer">
+        <span>ATC / CONTROL <b>·</b> AGENT TRAFFIC CONTROL</span>
+        <span>LOCAL TELEMETRY <b>·</b> <span id="footer-time">--</span></span>
+      </footer>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

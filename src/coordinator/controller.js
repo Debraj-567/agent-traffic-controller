@@ -1,0 +1,259 @@
+import { AgentRegistry } from "../agents/registry.js";
+import { TaskManager } from "../agents/task_manager.js";
+import { ResourceManager } from "../scheduler/resource_manager.js";
+import { PriorityScheduler } from "../scheduler/priority.js";
+import { WaitForGraph } from "../detection/wait_for_graph.js";
+import { DeadlockDetector } from "../detection/deadlock.js";
+import { ConflictDetector } from "../detection/conflicts.js";
+import { EventBus } from "../observability/event_bus.js";
+
+export class TrafficController {
+  constructor() {
+    this.registry = new AgentRegistry();
+    this.tasks = new TaskManager(this.registry);
+    this.resources = new ResourceManager();
+    this.scheduler = new PriorityScheduler();
+
+    this.waitGraph = new WaitForGraph();
+    this.deadlocks = new DeadlockDetector(this.waitGraph);
+    this.conflicts = new ConflictDetector(this.resources);
+
+    // Resource ID -> FIFO list of agents waiting for it.
+    this.resourceWaiters = new Map();
+    this.recoveryHistory = [];
+    this.eventBus = new EventBus();
+    this.emitEvent = (type, detail = {}) => this.eventBus.publish(type, detail);
+  }
+
+  registerAgent(id, role = "worker") {
+    const agent = this.registry.register(id, role);
+    this.waitGraph.addAgent(id);
+    this.emitEvent("agent.registered", { agentId: id, role });
+    return agent;
+  }
+
+  submitTask(id, description, priority = 1, resources = []) {
+    const task = this.tasks.create(id, description, priority, resources);
+    this.scheduler.enqueue(task);
+    this.emitEvent("task.submitted", { taskId: id, priority, resources });
+    return task;
+  }
+
+  requestResource(agentId, resourceId) {
+    if (!this.registry.get(agentId)) {
+      throw new Error(`Unknown agent: ${agentId}`);
+    }
+
+    const result = this.resources.acquire(resourceId, agentId);
+
+    if (result.acquired) {
+      return { ...result, status: "granted" };
+    }
+
+    const conflict = this.conflicts.check(resourceId, agentId);
+
+    this.waitGraph.addDependency(agentId, result.owner);
+
+    const queue = this.resourceWaiters.get(resourceId) ?? [];
+
+    if (!queue.includes(agentId)) {
+      queue.push(agentId);
+    }
+
+    this.resourceWaiters.set(resourceId, queue);
+
+    const deadlock = this.deadlocks.detect();
+
+    if (deadlock.deadlocked) {
+      const recovery = this.recoverDeadlock(agentId, deadlock);
+
+      return {
+        acquired: false,
+        status: "deadlock_recovered",
+        conflict,
+        deadlock,
+        recovery
+      };
+    }
+
+    return {
+      acquired: false,
+      status: "waiting",
+      resourceId,
+      owner: result.owner,
+      conflict,
+      deadlock
+    };
+  }
+
+  // The latest requester is selected as the victim for this MVP.
+  recoverDeadlock(victimAgent, deadlock) {
+    const releasedResources = [];
+    const grants = [];
+
+    // Remove the victim from every waiting queue.
+    for (const [resourceId, queue] of this.resourceWaiters.entries()) {
+      this.resourceWaiters.set(
+        resourceId,
+        queue.filter(id => id !== victimAgent)
+      );
+    }
+
+    // Remove all outgoing wait dependencies of the victim.
+    for (const dependency of this.waitGraph.getDependencies(victimAgent)) {
+      this.waitGraph.removeDependency(victimAgent, dependency);
+    }
+
+    // Release every resource currently held by the victim.
+    const locks = this.resources.getLocks();
+
+    for (const [resourceId, owner] of Object.entries(locks)) {
+      if (owner !== victimAgent) continue;
+
+      this.resources.release(resourceId, victimAgent);
+      releasedResources.push(resourceId);
+
+      const grant = this.grantNextWaiter(resourceId);
+
+      if (grant) grants.push(grant);
+    }
+
+    const record = {
+      victimAgent,
+      strategy: "latest_requester_rollback",
+      releasedResources,
+      grants,
+      originalCycles: deadlock.cycles,
+      timestamp: new Date().toISOString()
+    };
+
+    this.recoveryHistory.push(record);
+    this.emitEvent("deadlock.recovered", record);
+    return record;
+  }
+
+  // Grant a released resource to the first valid waiting agent.
+  grantNextWaiter(resourceId) {
+    const queue = this.resourceWaiters.get(resourceId) ?? [];
+
+    while (queue.length > 0) {
+      const nextAgent = queue.shift();
+
+      if (!this.registry.get(nextAgent)) continue;
+
+      const result = this.resources.acquire(resourceId, nextAgent);
+
+      if (!result.acquired) continue;
+
+      for (const dependency of this.waitGraph.getDependencies(nextAgent)) {
+        this.waitGraph.removeDependency(nextAgent, dependency);
+      }
+
+      this.resourceWaiters.set(resourceId, queue);
+
+      return {
+        resourceId,
+        grantedTo: nextAgent
+      };
+    }
+
+    this.resourceWaiters.set(resourceId, queue);
+    return null;
+  }
+
+  releaseResource(agentId, resourceId) {
+    const released = this.resources.release(resourceId, agentId);
+
+    if (!released) {
+      return {
+        released: false,
+        resourceId,
+        agentId,
+        reason: "Resource was not owned by this agent"
+      };
+    }
+
+    const grant = this.grantNextWaiter(resourceId);
+
+    return {
+      released: true,
+      resourceId,
+      agentId,
+      grant
+    };
+  }
+
+
+  // Acquire a task's resources through the conflict and deadlock pipeline.
+  // Partial acquisitions are released if any resource is unavailable.
+  tryAcquireResources(agentId, resourceIds) {
+    const acquired = [];
+    const resources = [...new Set(resourceIds)].sort();
+
+    for (const resourceId of resources) {
+      const result = this.requestResource(agentId, resourceId);
+
+      if (!result.acquired) {
+        // Remove this temporary wait request. The runtime will retry
+        // the task on its next scheduling pass.
+        for (const [id, queue] of this.resourceWaiters.entries()) {
+          this.resourceWaiters.set(
+            id,
+            queue.filter(waitingAgent => waitingAgent !== agentId)
+          );
+        }
+
+        for (const dependency of this.waitGraph.getDependencies(agentId)) {
+          this.waitGraph.removeDependency(agentId, dependency);
+        }
+
+        // Release partial acquisitions without granting stale waiters.
+        for (const heldResource of acquired.reverse()) {
+          this.resources.release(heldResource, agentId);
+        }
+
+        return {
+          acquired: false,
+          status: result.status,
+          blockedOn: resourceId,
+          details: result
+        };
+      }
+
+      acquired.push(resourceId);
+    }
+
+    return {
+      acquired: true,
+      status: "granted",
+      resources: acquired
+    };
+  }
+
+  releaseResources(agentId, resourceIds) {
+    const released = [];
+
+    for (const resourceId of [...resourceIds].reverse()) {
+      const result = this.releaseResource(agentId, resourceId);
+
+      if (result.released) {
+        released.push(resourceId);
+      }
+    }
+
+    return released;
+  }
+
+  getStatus() {
+    return {
+      agents: this.registry.list(),
+      tasks: this.tasks.list(),
+      locks: this.resources.getLocks(),
+      waitingQueues: Object.fromEntries(this.resourceWaiters),
+      waitGraph: this.waitGraph.getGraph(),
+      deadlocks: this.deadlocks.detect(),
+      conflicts: this.conflicts.list(),
+      recoveryHistory: this.recoveryHistory
+    };
+  }
+}

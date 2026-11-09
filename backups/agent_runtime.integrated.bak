@@ -1,0 +1,155 @@
+export class AgentRuntime {
+  constructor(controller, workers) {
+    this.controller = controller;
+    this.workers = workers;
+    this.workerIndex = 0;
+    this.executionHistory = [];
+    this.waitingTasks = [];
+  }
+
+  findAvailableWorker() {
+    for (let i = 0; i < this.workers.length; i++) {
+      const index = (this.workerIndex + i) % this.workers.length;
+      const worker = this.workers[index];
+      const agent = this.controller.registry.get(worker.id);
+
+      if (agent && agent.status === "idle") {
+        return { worker, index };
+      }
+    }
+
+    return null;
+  }
+
+  async executePrepared(task, worker, resources) {
+    const startedAt = Date.now();
+
+    try {
+      console.log(`\n[${worker.id}] Executing ${task.id}`);
+      console.log(
+        `[Lock Manager] Acquired: ${resources.join(", ") || "none"}`
+      );
+
+      const result = await worker.execute(task.description);
+
+      this.controller.tasks.complete(task.id, result);
+
+      const record = {
+        taskId: task.id,
+        agentId: worker.id,
+        status: "completed",
+        durationMs: Date.now() - startedAt
+      };
+
+      this.executionHistory.push(record);
+      return record;
+    } catch (error) {
+      this.controller.tasks.fail(task.id, error.message);
+
+      const record = {
+        taskId: task.id,
+        agentId: worker.id,
+        status: "failed",
+        error: error.message
+      };
+
+      this.executionHistory.push(record);
+      return record;
+    } finally {
+      const released = this.controller.releaseResources(
+        worker.id,
+        resources
+      );
+
+      for (const resource of released) {
+        console.log(
+          `[Lock Manager] Released: ${resource} by ${worker.id}`
+        );
+      }
+    }
+  }
+
+  async runAll() {
+    const results = [];
+
+    while (this.controller.scheduler.list().length > 0) {
+      const queueSize = this.controller.scheduler.list().length;
+      const batch = [];
+      const deferred = [];
+
+      for (let i = 0; i < queueSize; i++) {
+        const task = this.controller.scheduler.next();
+        const selection = this.findAvailableWorker();
+
+        if (!selection) {
+          deferred.push(task);
+          continue;
+        }
+
+        const { worker, index } = selection;
+        const resources = [...new Set(task.resources ?? [])].sort();
+
+        const reservation = this.controller.tryAcquireResources(
+          worker.id,
+          resources
+        );
+
+        if (!reservation.acquired) {
+          console.log(
+            `[Conflict] ${worker.id} blocked on ${reservation.blockedOn}`
+          );
+          deferred.push(task);
+          continue;
+        }
+
+        try {
+          this.controller.tasks.assign(task.id, worker.id);
+          this.workerIndex = (index + 1) % this.workers.length;
+
+          batch.push({ task, worker, resources });
+        } catch (error) {
+          this.controller.releaseResources(worker.id, resources);
+          deferred.push(task);
+        }
+      }
+
+      for (const task of deferred) {
+        this.controller.scheduler.enqueue(task);
+      }
+
+      if (batch.length === 0) {
+        this.waitingTasks = deferred.map(task => task.id);
+
+        return {
+          results,
+          status: "blocked",
+          waitingTasks: this.waitingTasks
+        };
+      }
+
+      console.log(
+        `\n[Scheduler] Dispatching ${batch.length} tasks concurrently.`
+      );
+
+      const completed = await Promise.all(
+        batch.map(({ task, worker, resources }) =>
+          this.executePrepared(task, worker, resources)
+        )
+      );
+
+      results.push(...completed);
+    }
+
+    this.waitingTasks = [];
+
+    return {
+      results,
+      status: "completed",
+      waitingTasks: []
+    };
+  }
+
+  getHistory() {
+    return [...this.executionHistory];
+  }
+}
